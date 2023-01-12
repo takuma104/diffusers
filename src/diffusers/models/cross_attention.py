@@ -296,7 +296,9 @@ class XFormersCrossAttnProcessor:
         value = attn.head_to_batch_dim(value).contiguous()
 
         op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
-        print(query.shape, key.shape, value.shape)
+        if max(query.shape[-1], key.shape[-1]) > 128:
+            print('warning: Cutlass Operation used. This may cause unrepeatable results.')                
+            op = xformers.ops.MemoryEfficientAttentionCutlassOp
         hidden_states = xformers.ops.memory_efficient_attention(query, key, value, attn_bias=attention_mask, op=op)
         hidden_states = hidden_states.to(query.dtype)
         hidden_states = attn.batch_to_head_dim(hidden_states)
