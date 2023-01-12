@@ -93,7 +93,9 @@ class CrossAttention(nn.Module):
         processor = processor if processor is not None else CrossAttnProcessor()
         self.set_processor(processor)
 
-    def set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool):
+        self._xformers_use_flash_attention = False
+
+    def set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool, use_flash_attention: bool = False):
         if use_memory_efficient_attention_xformers:
             if self.added_kv_proj_dim is not None:
                 # TODO(Anton, Patrick, Suraj, William) - currently xformers doesn't work for UnCLIP
@@ -130,6 +132,7 @@ class CrossAttention(nn.Module):
             processor = CrossAttnProcessor()
 
         self.set_processor(processor)
+        self._xformers_use_flash_attention = use_flash_attention
 
     def set_attention_slice(self, slice_size):
         if slice_size is not None and slice_size > self.sliceable_head_dim:
@@ -158,6 +161,7 @@ class CrossAttention(nn.Module):
             hidden_states,
             encoder_hidden_states=encoder_hidden_states,
             attention_mask=attention_mask,
+            use_flash_attention=self._xformers_use_flash_attention,
             **cross_attention_kwargs,
         )
 
@@ -280,7 +284,7 @@ class CrossAttnAddedKVProcessor:
 
 
 class XFormersCrossAttnProcessor:
-    def __call__(self, attn: CrossAttention, hidden_states, encoder_hidden_states=None, attention_mask=None):
+    def __call__(self, attn: CrossAttention, hidden_states, encoder_hidden_states=None, attention_mask=None, use_flash_attention=False):
         batch_size, sequence_length, _ = hidden_states.shape
 
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length)
@@ -295,10 +299,13 @@ class XFormersCrossAttnProcessor:
         key = attn.head_to_batch_dim(key).contiguous()
         value = attn.head_to_batch_dim(value).contiguous()
 
-        op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
-        if max(query.shape[-1], key.shape[-1]) > 128:
-            print('warning: Cutlass Operation used. This may cause unrepeatable results.')                
-            op = xformers.ops.MemoryEfficientAttentionCutlassOp
+        if use_flash_attention:
+            op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
+            if max(query.shape[-1], key.shape[-1]) > 128:
+                print('warning: Head dimention size over 128. Auto select operation used. This may cause unrepeatable results.')                
+                op = None
+        else:
+            op = None
         hidden_states = xformers.ops.memory_efficient_attention(query, key, value, attn_bias=attention_mask, op=op)
         hidden_states = hidden_states.to(query.dtype)
         hidden_states = attn.batch_to_head_dim(hidden_states)

@@ -71,6 +71,7 @@ class AttentionBlock(nn.Module):
         self.proj_attn = nn.Linear(channels, channels, 1)
 
         self._use_memory_efficient_attention_xformers = False
+        self._xformers_use_flash_attention = False
 
     def reshape_heads_to_batch_dim(self, tensor):
         batch_size, seq_len, dim = tensor.shape
@@ -86,7 +87,7 @@ class AttentionBlock(nn.Module):
         tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size // head_size, seq_len, dim * head_size)
         return tensor
 
-    def set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool):
+    def set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool, use_flash_attention: bool = False):
         if use_memory_efficient_attention_xformers:
             if not is_xformers_available():
                 raise ModuleNotFoundError(
@@ -110,6 +111,7 @@ class AttentionBlock(nn.Module):
                 except Exception as e:
                     raise e
         self._use_memory_efficient_attention_xformers = use_memory_efficient_attention_xformers
+        self._xformers_use_flash_attention = use_flash_attention
 
     def forward(self, hidden_states):
         residual = hidden_states
@@ -133,10 +135,13 @@ class AttentionBlock(nn.Module):
 
         if self._use_memory_efficient_attention_xformers:
             # Memory efficient attention
-            op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
-            if max(query_proj.shape[-1], key_proj.shape[-1]) > 128:
-                print('warning: Cutlass Operation used. This may cause unrepeatable results.')                
-                op = xformers.ops.MemoryEfficientAttentionCutlassOp
+            if self._xformers_use_flash_attention:
+                op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
+                if max(query_proj.shape[-1], key_proj.shape[-1]) > 128:
+                    print('warning: Head dimention size over 128. Auto select operation used. This may cause unrepeatable results.')                
+                    op = None
+            else:
+                op = None
             hidden_states = xformers.ops.memory_efficient_attention(query_proj, key_proj, value_proj, attn_bias=None, op=op)
             hidden_states = hidden_states.to(query_proj.dtype)
         else:
