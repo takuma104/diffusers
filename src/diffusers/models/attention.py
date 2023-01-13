@@ -20,7 +20,9 @@ from torch import nn
 
 from ..utils.import_utils import is_xformers_available
 from .cross_attention import CrossAttention
+from ..utils import logging
 
+logger = logging.get_logger(__name__)
 
 if is_xformers_available():
     import xformers
@@ -138,7 +140,7 @@ class AttentionBlock(nn.Module):
             if self._xformers_use_flash_attention:
                 op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
                 if max(query_proj.shape[-1], key_proj.shape[-1]) > 128:
-                    print('warning: Head dimention size over 128. Auto select operation used. This may cause unrepeatable results.')                
+                    logger.warning('Head dimention size over 128. Auto select operation used. This may cause unrepeatable results.')                
                     op = None
             else:
                 op = None
