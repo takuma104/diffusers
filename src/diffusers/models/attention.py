@@ -139,8 +139,9 @@ class AttentionBlock(nn.Module):
             # Memory efficient attention
             if self._xformers_use_flash_attention:
                 op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
-                if max(query_proj.shape[-1], key_proj.shape[-1]) > 128:
-                    logger.warning('Head dimention size over 128. Auto select operation used. This may cause unrepeatable results.')                
+                fw, bw = op
+                if not fw.supports(xformers.ops.fmha.Inputs(query=query_proj, key=key_proj, value=value_proj)):
+                    logger.warning('Flash Attention is not availabe for the input arguments. Fallback to default xFormers\' backend.')                
                     op = None
             else:
                 op = None

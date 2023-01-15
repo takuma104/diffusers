@@ -303,8 +303,9 @@ class XFormersCrossAttnProcessor:
 
         if use_flash_attention:
             op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
-            if max(query.shape[-1], key.shape[-1]) > 128:
-                logger.warning('Head dimention size over 128. Auto select operation used. This may cause unrepeatable results.')                
+            fw, bw = op
+            if not fw.supports(xformers.ops.fmha.Inputs(query=query, key=key, value=value, attn_bias=attention_mask)):
+                logger.warning('Flash Attention is not availabe for the input arguments. Fallback to default xFormers\' backend.')                
                 op = None
         else:
             op = None
