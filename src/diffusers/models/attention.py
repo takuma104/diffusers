@@ -18,9 +18,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from ..utils import logging
 from ..utils.import_utils import is_xformers_available
 from .cross_attention import CrossAttention
-from ..utils import logging
+
 
 logger = logging.get_logger(__name__)
 
@@ -89,12 +90,16 @@ class AttentionBlock(nn.Module):
         tensor = tensor.permute(0, 2, 1, 3).reshape(batch_size // head_size, seq_len, dim * head_size)
         return tensor
 
-    def set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool, use_flash_attention: bool = False):
+    def set_use_memory_efficient_attention_xformers(
+        self, use_memory_efficient_attention_xformers: bool, use_flash_attention: bool = False
+    ):
         if use_memory_efficient_attention_xformers:
             if not is_xformers_available():
                 raise ModuleNotFoundError(
-                    "Refer to https://github.com/facebookresearch/xformers for more information on how to install"
-                    " xformers",
+                    (
+                        "Refer to https://github.com/facebookresearch/xformers for more information on how to install"
+                        " xformers"
+                    ),
                     name="xformers",
                 )
             elif not torch.cuda.is_available():
@@ -141,11 +146,16 @@ class AttentionBlock(nn.Module):
                 op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
                 fw, bw = op
                 if not fw.supports(xformers.ops.fmha.Inputs(query=query_proj, key=key_proj, value=value_proj)):
-                    logger.warning('Flash Attention is not availabe for the input arguments. Fallback to default xFormers\' backend.')                
+                    logger.warning(
+                        "Flash Attention is not availabe for the input arguments. Fallback to default xFormers'"
+                        " backend."
+                    )
                     op = None
             else:
                 op = None
-            hidden_states = xformers.ops.memory_efficient_attention(query_proj, key_proj, value_proj, attn_bias=None, op=op)
+            hidden_states = xformers.ops.memory_efficient_attention(
+                query_proj, key_proj, value_proj, attn_bias=None, op=op
+            )
             hidden_states = hidden_states.to(query_proj.dtype)
         else:
             attention_scores = torch.baddbmm(

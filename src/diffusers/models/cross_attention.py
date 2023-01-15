@@ -17,8 +17,9 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from ..utils.import_utils import is_xformers_available
 from ..utils import logging
+from ..utils.import_utils import is_xformers_available
+
 
 logger = logging.get_logger(__name__)
 
@@ -97,7 +98,9 @@ class CrossAttention(nn.Module):
 
         self._xformers_use_flash_attention = False
 
-    def set_use_memory_efficient_attention_xformers(self, use_memory_efficient_attention_xformers: bool, use_flash_attention: bool = False):
+    def set_use_memory_efficient_attention_xformers(
+        self, use_memory_efficient_attention_xformers: bool, use_flash_attention: bool = False
+    ):
         if use_memory_efficient_attention_xformers:
             if self.added_kv_proj_dim is not None:
                 # TODO(Anton, Patrick, Suraj, William) - currently xformers doesn't work for UnCLIP
@@ -109,8 +112,10 @@ class CrossAttention(nn.Module):
                 )
             elif not is_xformers_available():
                 raise ModuleNotFoundError(
-                    "Refer to https://github.com/facebookresearch/xformers for more information on how to install"
-                    " xformers",
+                    (
+                        "Refer to https://github.com/facebookresearch/xformers for more information on how to install"
+                        " xformers"
+                    ),
                     name="xformers",
                 )
             elif not torch.cuda.is_available():
@@ -286,7 +291,14 @@ class CrossAttnAddedKVProcessor:
 
 
 class XFormersCrossAttnProcessor:
-    def __call__(self, attn: CrossAttention, hidden_states, encoder_hidden_states=None, attention_mask=None, use_flash_attention=False):
+    def __call__(
+        self,
+        attn: CrossAttention,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        use_flash_attention=False,
+    ):
         batch_size, sequence_length, _ = hidden_states.shape
 
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length)
@@ -305,7 +317,9 @@ class XFormersCrossAttnProcessor:
             op = xformers.ops.MemoryEfficientAttentionFlashAttentionOp
             fw, bw = op
             if not fw.supports(xformers.ops.fmha.Inputs(query=query, key=key, value=value, attn_bias=attention_mask)):
-                logger.warning('Flash Attention is not availabe for the input arguments. Fallback to default xFormers\' backend.')                
+                logger.warning(
+                    "Flash Attention is not availabe for the input arguments. Fallback to default xFormers' backend."
+                )
                 op = None
         else:
             op = None
