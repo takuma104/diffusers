@@ -16,7 +16,10 @@
 
 import argparse
 
-from diffusers.pipelines.stable_diffusion.convert_from_ckpt import load_pipeline_from_original_stable_diffusion_ckpt
+from diffusers.pipelines.stable_diffusion.convert_from_ckpt import (
+    load_controlnet_from_ckpt,
+    load_pipeline_from_original_stable_diffusion_ckpt,
+)
 
 
 if __name__ == "__main__":
@@ -125,26 +128,34 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    pipe = load_pipeline_from_original_stable_diffusion_ckpt(
-        checkpoint_path=args.checkpoint_path,
-        original_config_file=args.original_config_file,
-        image_size=args.image_size,
-        prediction_type=args.prediction_type,
-        model_type=args.pipeline_type,
-        extract_ema=args.extract_ema,
-        scheduler_type=args.scheduler_type,
-        num_in_channels=args.num_in_channels,
-        upcast_attention=args.upcast_attention,
-        from_safetensors=args.from_safetensors,
-        device=args.device,
-        stable_unclip=args.stable_unclip,
-        stable_unclip_prior=args.stable_unclip_prior,
-        clip_stats_path=args.clip_stats_path,
-        controlnet=args.controlnet,
-    )
-
-    if args.controlnet:
-        # only save the controlnet model
-        pipe.controlnet.save_pretrained(args.dump_path, safe_serialization=args.to_safetensors)
-    else:
+    if not args.controlnet:
+        pipe = load_pipeline_from_original_stable_diffusion_ckpt(
+            checkpoint_path=args.checkpoint_path,
+            original_config_file=args.original_config_file,
+            image_size=args.image_size,
+            prediction_type=args.prediction_type,
+            model_type=args.pipeline_type,
+            extract_ema=args.extract_ema,
+            scheduler_type=args.scheduler_type,
+            num_in_channels=args.num_in_channels,
+            upcast_attention=args.upcast_attention,
+            from_safetensors=args.from_safetensors,
+            device=args.device,
+            stable_unclip=args.stable_unclip,
+            stable_unclip_prior=args.stable_unclip_prior,
+            clip_stats_path=args.clip_stats_path,
+            controlnet=args.controlnet,
+        )
         pipe.save_pretrained(args.dump_path, safe_serialization=args.to_safetensors)
+    else:  # controlnet
+        # only save the controlnet model
+        model = load_controlnet_from_ckpt(
+            checkpoint_path=args.checkpoint_path,
+            original_config_file=args.original_config_file,
+            image_size=args.image_size,
+            extract_ema=args.extract_ema,
+            upcast_attention=args.upcast_attention,
+            device=args.device,
+            from_safetensors=args.from_safetensors,
+        )
+        model.save_pretrained(args.dump_path, safe_serialization=args.to_safetensors)

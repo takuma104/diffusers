@@ -45,7 +45,6 @@ from diffusers import (
     LMSDiscreteScheduler,
     PNDMScheduler,
     PriorTransformer,
-    StableDiffusionControlNetPipeline,
     StableDiffusionPipeline,
     StableUnCLIPImg2ImgPipeline,
     StableUnCLIPPipeline,
@@ -970,7 +969,6 @@ def load_pipeline_from_original_stable_diffusion_ckpt(
     stable_unclip: Optional[str] = None,
     stable_unclip_prior: Optional[str] = None,
     clip_stats_path: Optional[str] = None,
-    controlnet: Optional[bool] = None,
 ) -> StableDiffusionPipeline:
     """
     Load a Stable Diffusion pipeline object from a CompVis-style `.ckpt`/`.safetensors` file and (ideally) a `.yaml`
@@ -1245,41 +1243,15 @@ def load_pipeline_from_original_stable_diffusion_ckpt(
         tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
         safety_checker = StableDiffusionSafetyChecker.from_pretrained("CompVis/stable-diffusion-safety-checker")
         feature_extractor = AutoFeatureExtractor.from_pretrained("CompVis/stable-diffusion-safety-checker")
-
-        if controlnet:
-            # Convert the ControlNetModel model.
-            ctrlnet_config = create_unet_diffusers_config(original_config, image_size=image_size, controlnet=True)
-            ctrlnet_config["upcast_attention"] = upcast_attention
-
-            ctrlnet_config.pop("sample_size")
-
-            controlnet_model = ControlNetModel(**ctrlnet_config)
-
-            converted_ctrl_checkpoint = convert_ldm_unet_checkpoint(
-                checkpoint, ctrlnet_config, path=checkpoint_path, extract_ema=extract_ema, controlnet=True
-            )
-            controlnet_model.load_state_dict(converted_ctrl_checkpoint)
-
-            pipe = StableDiffusionControlNetPipeline(
-                vae=vae,
-                text_encoder=text_model,
-                tokenizer=tokenizer,
-                unet=unet,
-                controlnet=controlnet_model,
-                scheduler=scheduler,
-                safety_checker=safety_checker,
-                feature_extractor=feature_extractor,
-            )
-        else:
-            pipe = StableDiffusionPipeline(
-                vae=vae,
-                text_encoder=text_model,
-                tokenizer=tokenizer,
-                unet=unet,
-                scheduler=scheduler,
-                safety_checker=safety_checker,
-                feature_extractor=feature_extractor,
-            )
+        pipe = StableDiffusionPipeline(
+            vae=vae,
+            text_encoder=text_model,
+            tokenizer=tokenizer,
+            unet=unet,
+            scheduler=scheduler,
+            safety_checker=safety_checker,
+            feature_extractor=feature_extractor,
+        )
     else:
         text_config = create_ldm_bert_config(original_config)
         text_model = convert_ldm_bert_checkpoint(checkpoint, text_config)
@@ -1287,3 +1259,67 @@ def load_pipeline_from_original_stable_diffusion_ckpt(
         pipe = LDMTextToImagePipeline(vqvae=vae, bert=text_model, tokenizer=tokenizer, unet=unet, scheduler=scheduler)
 
     return pipe
+
+
+def load_controlnet_from_ckpt(
+    checkpoint_path: str,
+    original_config_file: str,
+    image_size: int = 512,
+    extract_ema: bool = False,
+    upcast_attention: Optional[bool] = None,
+    device: str = None,
+    from_safetensors: bool = False,
+) -> ControlNetModel:
+    if from_safetensors:
+        if not is_safetensors_available():
+            raise ValueError(BACKENDS_MAPPING["safetensors"][1])
+
+        from safetensors import safe_open
+
+        checkpoint = {}
+        with safe_open(checkpoint_path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                checkpoint[key] = f.get_tensor(key)
+    else:
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+        else:
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    # Sometimes models don't have the global_step item
+    if "global_step" in checkpoint:
+        global_step = checkpoint["global_step"]
+    else:
+        print("global_step key not found in model")
+        global_step = None
+
+    from omegaconf import OmegaConf
+
+    original_config = OmegaConf.load(original_config_file)
+
+    if (
+        "parameterization" in original_config["model"]["params"]
+        and original_config["model"]["params"]["parameterization"] == "v"
+    ):
+        if image_size is None:
+            # NOTE: For stable diffusion 2 base one has to pass `image_size==512`
+            # as it relies on a brittle global step parameter here
+            image_size = 512 if global_step == 875000 else 768
+    else:
+        if image_size is None:
+            image_size = 512
+
+    # Convert the ControlNetModel model.
+    ctrlnet_config = create_unet_diffusers_config(original_config, image_size=image_size, controlnet=True)
+    ctrlnet_config["upcast_attention"] = upcast_attention
+
+    ctrlnet_config.pop("sample_size")
+
+    controlnet_model = ControlNetModel(**ctrlnet_config)
+
+    converted_ctrl_checkpoint = convert_ldm_unet_checkpoint(
+        checkpoint, ctrlnet_config, path=checkpoint_path, extract_ema=extract_ema, controlnet=True
+    )
+    controlnet_model.load_state_dict(converted_ctrl_checkpoint)
+    return controlnet_model
