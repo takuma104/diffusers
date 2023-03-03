@@ -1294,6 +1294,9 @@ def load_controlnet_from_ckpt(
         print("global_step key not found in model")
         global_step = None
 
+    if "state_dict" in checkpoint:
+        checkpoint = checkpoint["state_dict"]
+
     from omegaconf import OmegaConf
 
     original_config = OmegaConf.load(original_config_file)
