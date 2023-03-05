@@ -14,7 +14,7 @@
 
 
 import inspect
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 
 import numpy as np
 import PIL.Image
@@ -33,9 +33,146 @@ from diffusers.utils import (
 )
 from diffusers.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput, StableDiffusionSafetyChecker
-
+from diffusers.models.controlnet import ControlNetOutput
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+class ControlNetProcessor(object):
+    def __init__(
+        self,
+        controlnet: ControlNetModel,
+        image: Union[torch.FloatTensor, PIL.Image.Image, List[torch.FloatTensor], List[PIL.Image.Image]] = None,
+        conditioning_scale: float = 1.0,
+    ):
+        self.controlnet = controlnet
+        self.image = image
+        self.conditioning_scale = conditioning_scale
+
+    def _default_height_width(self, height, width, image):
+        if isinstance(image, list):
+            image = image[0]
+
+        if height is None:
+            if isinstance(image, PIL.Image.Image):
+                height = image.height
+            elif isinstance(image, torch.Tensor):
+                height = image.shape[3]
+
+            height = (height // 8) * 8  # round down to nearest multiple of 8
+
+        if width is None:
+            if isinstance(image, PIL.Image.Image):
+                width = image.width
+            elif isinstance(image, torch.Tensor):
+                width = image.shape[2]
+
+            width = (width // 8) * 8  # round down to nearest multiple of 8
+
+        return height, width
+
+    def default_height_width(self, height, width):
+        return self._default_height_width(height, width, self.image)
+
+    def _prepare_image(self, image, width, height, batch_size, num_images_per_prompt, device, dtype):
+        if not isinstance(image, torch.Tensor):
+            if isinstance(image, PIL.Image.Image):
+                image = [image]
+
+            if isinstance(image[0], PIL.Image.Image):
+                image = [
+                    np.array(i.resize((width, height), resample=PIL_INTERPOLATION["lanczos"]))[None, :] for i in image
+                ]
+                image = np.concatenate(image, axis=0)
+                image = np.array(image).astype(np.float32) / 255.0
+                image = image.transpose(0, 3, 1, 2)
+                image = torch.from_numpy(image)
+            elif isinstance(image[0], torch.Tensor):
+                image = torch.cat(image, dim=0)
+
+        image_batch_size = image.shape[0]
+
+        if image_batch_size == 1:
+            repeat_by = batch_size
+        else:
+            # image batch size is the same as prompt batch size
+            repeat_by = num_images_per_prompt
+
+        image = image.repeat_interleave(repeat_by, dim=0)
+
+        image = image.to(device=device, dtype=dtype)
+
+        return image
+
+    def _check_inputs(self, image, prompt, prompt_embeds):
+        image_is_pil = isinstance(image, PIL.Image.Image)
+        image_is_tensor = isinstance(image, torch.Tensor)
+        image_is_pil_list = isinstance(image, list) and isinstance(image[0], PIL.Image.Image)
+        image_is_tensor_list = isinstance(image, list) and isinstance(image[0], torch.Tensor)
+
+        if not image_is_pil and not image_is_tensor and not image_is_pil_list and not image_is_tensor_list:
+            raise TypeError(
+                "image must be passed and be one of PIL image, torch tensor, list of PIL images, or list of torch tensors"
+            )
+
+        if image_is_pil:
+            image_batch_size = 1
+        elif image_is_tensor:
+            image_batch_size = image.shape[0]
+        elif image_is_pil_list:
+            image_batch_size = len(image)
+        elif image_is_tensor_list:
+            image_batch_size = len(image)
+
+        if prompt is not None and isinstance(prompt, str):
+            prompt_batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            prompt_batch_size = len(prompt)
+        elif prompt_embeds is not None:
+            prompt_batch_size = prompt_embeds.shape[0]
+
+        if image_batch_size != 1 and image_batch_size != prompt_batch_size:
+            raise ValueError(
+                f"If image batch size is not 1, image batch size must be same as prompt batch size. image batch size: {image_batch_size}, prompt batch size: {prompt_batch_size}"
+            )
+
+    def check_inputs(self, prompt, prompt_embeds):
+        self._check_inputs(self.image, prompt, prompt_embeds)
+
+    def prepare_image(self, width, height, batch_size, num_images_per_prompt, device, do_classifier_free_guidance):
+        self.image = self._prepare_image(
+            self.image, width, height, batch_size, num_images_per_prompt, device, self.controlnet.dtype
+        )
+        if do_classifier_free_guidance:
+            self.image = torch.cat([self.image] * 2)
+
+    def __call__(
+        self,
+        sample: torch.FloatTensor,
+        timestep: Union[torch.Tensor, float, int],
+        encoder_hidden_states: torch.Tensor,
+        class_labels: Optional[torch.Tensor] = None,
+        timestep_cond: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        return_dict: bool = True,
+    ) -> Tuple:
+        down_block_res_samples, mid_block_res_sample = self.controlnet(
+            sample=sample,
+            controlnet_cond=self.image,
+            timestep=timestep,
+            encoder_hidden_states=encoder_hidden_states,
+            class_labels=class_labels,
+            timestep_cond=timestep_cond,
+            attention_mask=attention_mask,
+            cross_attention_kwargs=cross_attention_kwargs,
+            return_dict=False,
+        )
+        down_block_res_samples = [
+            down_block_res_sample * self.conditioning_scale for down_block_res_sample in down_block_res_samples
+        ]
+        mid_block_res_sample *= self.conditioning_scale
+        return (down_block_res_samples, mid_block_res_sample)
 
 
 EXAMPLE_DOC_STRING = """
@@ -102,8 +239,6 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
             Tokenizer of class
             [CLIPTokenizer](https://huggingface.co/docs/transformers/v4.21.0/en/model_doc/clip#transformers.CLIPTokenizer).
         unet ([`UNet2DConditionModel`]): Conditional U-Net architecture to denoise the encoded image latents.
-        controlnet ([`ControlNetModel`]):
-            Provides additional conditioning to the unet during the denoising process
         scheduler ([`SchedulerMixin`]):
             A scheduler to be used in combination with `unet` to denoise the encoded image latents. Can be one of
             [`DDIMScheduler`], [`LMSDiscreteScheduler`], or [`PNDMScheduler`].
@@ -121,7 +256,6 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
-        controlnet: ControlNetModel,
         scheduler: KarrasDiffusionSchedulers,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPFeatureExtractor,
@@ -150,7 +284,6 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
             text_encoder=text_encoder,
             tokenizer=tokenizer,
             unet=unet,
-            controlnet=controlnet,
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
@@ -191,7 +324,7 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
 
         device = torch.device(f"cuda:{gpu_id}")
 
-        for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae, self.controlnet]:
+        for cpu_offloaded_model in [self.unet, self.text_encoder, self.vae]:
             cpu_offload(cpu_offloaded_model, device)
 
         if self.safety_checker is not None:
@@ -220,7 +353,7 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
             _, hook = cpu_offload_with_hook(self.safety_checker, device, prev_module_hook=hook)
 
         # control net hook has be manually offloaded as it alternates with unet
-        cpu_offload_with_hook(self.controlnet, device)
+        # cpu_offload_with_hook(self.controlnet, device)
 
         # We'll offload the last model manually.
         self.final_offload_hook = hook
@@ -424,7 +557,6 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
     def check_inputs(
         self,
         prompt,
-        image,
         height,
         width,
         callback_steps,
@@ -469,67 +601,6 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
                     f" {negative_prompt_embeds.shape}."
                 )
 
-        image_is_pil = isinstance(image, PIL.Image.Image)
-        image_is_tensor = isinstance(image, torch.Tensor)
-        image_is_pil_list = isinstance(image, list) and isinstance(image[0], PIL.Image.Image)
-        image_is_tensor_list = isinstance(image, list) and isinstance(image[0], torch.Tensor)
-
-        if not image_is_pil and not image_is_tensor and not image_is_pil_list and not image_is_tensor_list:
-            raise TypeError(
-                "image must be passed and be one of PIL image, torch tensor, list of PIL images, or list of torch tensors"
-            )
-
-        if image_is_pil:
-            image_batch_size = 1
-        elif image_is_tensor:
-            image_batch_size = image.shape[0]
-        elif image_is_pil_list:
-            image_batch_size = len(image)
-        elif image_is_tensor_list:
-            image_batch_size = len(image)
-
-        if prompt is not None and isinstance(prompt, str):
-            prompt_batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            prompt_batch_size = len(prompt)
-        elif prompt_embeds is not None:
-            prompt_batch_size = prompt_embeds.shape[0]
-
-        if image_batch_size != 1 and image_batch_size != prompt_batch_size:
-            raise ValueError(
-                f"If image batch size is not 1, image batch size must be same as prompt batch size. image batch size: {image_batch_size}, prompt batch size: {prompt_batch_size}"
-            )
-
-    def prepare_image(self, image, width, height, batch_size, num_images_per_prompt, device, dtype):
-        if not isinstance(image, torch.Tensor):
-            if isinstance(image, PIL.Image.Image):
-                image = [image]
-
-            if isinstance(image[0], PIL.Image.Image):
-                image = [
-                    np.array(i.resize((width, height), resample=PIL_INTERPOLATION["lanczos"]))[None, :] for i in image
-                ]
-                image = np.concatenate(image, axis=0)
-                image = np.array(image).astype(np.float32) / 255.0
-                image = image.transpose(0, 3, 1, 2)
-                image = torch.from_numpy(image)
-            elif isinstance(image[0], torch.Tensor):
-                image = torch.cat(image, dim=0)
-
-        image_batch_size = image.shape[0]
-
-        if image_batch_size == 1:
-            repeat_by = batch_size
-        else:
-            # image batch size is the same as prompt batch size
-            repeat_by = num_images_per_prompt
-
-        image = image.repeat_interleave(repeat_by, dim=0)
-
-        image = image.to(device=device, dtype=dtype)
-
-        return image
-
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_latents
     def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
@@ -548,34 +619,12 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
         latents = latents * self.scheduler.init_noise_sigma
         return latents
 
-    def _default_height_width(self, height, width, image):
-        if isinstance(image, list):
-            image = image[0]
-
-        if height is None:
-            if isinstance(image, PIL.Image.Image):
-                height = image.height
-            elif isinstance(image, torch.Tensor):
-                height = image.shape[3]
-
-            height = (height // 8) * 8  # round down to nearest multiple of 8
-
-        if width is None:
-            if isinstance(image, PIL.Image.Image):
-                width = image.width
-            elif isinstance(image, torch.Tensor):
-                width = image.shape[2]
-
-            width = (width // 8) * 8  # round down to nearest multiple of 8
-
-        return height, width
-
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
+        processors: List[ControlNetProcessor],
         prompt: Union[str, List[str]] = None,
-        image: Union[torch.FloatTensor, PIL.Image.Image, List[torch.FloatTensor], List[PIL.Image.Image]] = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 50,
@@ -592,7 +641,6 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
         callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
         callback_steps: int = 1,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        controlnet_conditioning_scale: float = 1.0,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -601,10 +649,6 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
                 instead.
-            image (`torch.FloatTensor`, `PIL.Image.Image`, `List[torch.FloatTensor]` or `List[PIL.Image.Image]`):
-                The ControlNet input condition. ControlNet uses this input condition to generate guidance to Unet. If
-                the type is specified as `Torch.FloatTensor`, it is passed to ControlNet as is. PIL.Image.Image` can
-                also be accepted as an image. The control image is automatically resized to fit the output image.
             height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
                 The height in pixels of the generated image.
             width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
@@ -657,9 +701,6 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
                 A kwargs dictionary that if specified is passed along to the `AttnProcessor` as defined under
                 `self.processor` in
                 [diffusers.cross_attention](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/cross_attention.py).
-            controlnet_conditioning_scale (`float`, *optional*, defaults to 1.0):
-                The outputs of the controlnet are multiplied by `controlnet_conditioning_scale` before they are added
-                to the residual in the original unet.
 
         Examples:
 
@@ -671,12 +712,14 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
             (nsfw) content, according to the `safety_checker`.
         """
         # 0. Default height and width to unet
-        height, width = self._default_height_width(height, width, image)
+        height, width = processors[0].default_height_width(height, width)
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
-            prompt, image, height, width, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds
+            prompt, height, width, callback_steps, negative_prompt, prompt_embeds, negative_prompt_embeds
         )
+        for processor in processors:
+            processor.check_inputs(prompt, prompt_embeds)
 
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
@@ -704,18 +747,15 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
         )
 
         # 4. Prepare image
-        image = self.prepare_image(
-            image,
-            width,
-            height,
-            batch_size * num_images_per_prompt,
-            num_images_per_prompt,
-            device,
-            self.controlnet.dtype,
-        )
-
-        if do_classifier_free_guidance:
-            image = torch.cat([image] * 2)
+        for processor in processors:
+            processor.prepare_image(
+                width=width,
+                height=height,
+                batch_size=batch_size * num_images_per_prompt,
+                num_images_per_prompt=num_images_per_prompt,
+                device=device,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+            )
 
         # 5. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
@@ -745,19 +785,19 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                down_block_res_samples, mid_block_res_sample = self.controlnet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=prompt_embeds,
-                    controlnet_cond=image,
-                    return_dict=False,
-                )
-
-                down_block_res_samples = [
-                    down_block_res_sample * controlnet_conditioning_scale
-                    for down_block_res_sample in down_block_res_samples
-                ]
-                mid_block_res_sample *= controlnet_conditioning_scale
+                # controlnet inference
+                for i, processor in enumerate(processors):
+                    d_samples, m_sample = processor(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds,
+                        return_dict=False,
+                    )
+                    if i == 0:
+                        down_block_res_samples, mid_block_res_sample = d_samples, m_sample
+                    else:
+                        down_block_res_samples = [d_ + d for d_, d in zip(down_block_res_samples, d_samples)]
+                        mid_block_res_sample = mid_block_res_sample + m_sample
 
                 # predict the noise residual
                 noise_pred = self.unet(
@@ -787,7 +827,6 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
         # manually for max memory savings
         if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
             self.unet.to("cpu")
-            self.controlnet.to("cpu")
             torch.cuda.empty_cache()
 
         if output_type == "latent":
@@ -826,29 +865,33 @@ def main():
     controlnet_canny = ControlNetModel.from_pretrained(
         "fusing/stable-diffusion-v1-5-controlnet-canny", torch_dtype=torch.float16
     ).to("cuda")
-    controlnet_pose = ControlNetModel.from_pretrained(
-        "fusing/stable-diffusion-v1-5-controlnet-openpose", torch_dtype=torch.float16
-    ).to("cuda")
+    # controlnet_pose = ControlNetModel.from_pretrained(
+    #     "fusing/stable-diffusion-v1-5-controlnet-openpose", torch_dtype=torch.float16
+    # ).to("cuda")
 
     pipe = StableDiffusionMultiControlNetPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5", controlnet=controlnet_canny, safety_checker=None, torch_dtype=torch.float16
+        "runwayml/stable-diffusion-v1-5", safety_checker=None, torch_dtype=torch.float16
     ).to("cuda")
     pipe.enable_xformers_memory_efficient_attention()
 
-    canny_edged_image = load_image(
-        "https://huggingface.co/takuma104/controlnet_dev/resolve/main/vermeer_canny_edged.png"
-    )
-    openpose_image = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/pose.png")
+    canny_left = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/vermeer_left.png")
+    canny_right = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/vermeer_right.png")
+    # openpose_image = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/pose.png")
 
     generator = torch.Generator(device="cpu").manual_seed(0)
     image = pipe(
-        prompt="best quality, extremely detailed, football, a boy",
+        prompt="best quality, extremely detailed",
         negative_prompt="lowres, bad anatomy, worst quality, low quality",
-        image=canny_edged_image,
+        processors=[
+            ControlNetProcessor(controlnet_canny, canny_left),
+            ControlNetProcessor(controlnet_canny, canny_right),
+        ],
         generator=generator,
         num_inference_steps=30,
+        width=512,
+        height=512,
     ).images[0]
-    image.save("/tmp/canny.png")
+    image.save("/tmp/canny_left_right.png")
 
 
 if __name__ == "__main__":
