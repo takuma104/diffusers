@@ -865,9 +865,9 @@ def main():
     controlnet_canny = ControlNetModel.from_pretrained(
         "fusing/stable-diffusion-v1-5-controlnet-canny", torch_dtype=torch.float16
     ).to("cuda")
-    # controlnet_pose = ControlNetModel.from_pretrained(
-    #     "fusing/stable-diffusion-v1-5-controlnet-openpose", torch_dtype=torch.float16
-    # ).to("cuda")
+    controlnet_pose = ControlNetModel.from_pretrained(
+        "fusing/stable-diffusion-v1-5-controlnet-openpose", torch_dtype=torch.float16
+    ).to("cuda")
 
     pipe = StableDiffusionMultiControlNetPipeline.from_pretrained(
         "runwayml/stable-diffusion-v1-5", safety_checker=None, torch_dtype=torch.float16
@@ -876,22 +876,22 @@ def main():
 
     canny_left = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/vermeer_left.png")
     canny_right = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/vermeer_right.png")
-    # openpose_image = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/pose.png")
+    pose_right = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/pose_right.png")
 
     generator = torch.Generator(device="cpu").manual_seed(0)
     image = pipe(
         prompt="best quality, extremely detailed",
-        negative_prompt="lowres, bad anatomy, worst quality, low quality",
+        negative_prompt="monochrome, lowres, bad anatomy, worst quality, low quality",
         processors=[
             ControlNetProcessor(controlnet_canny, canny_left),
-            ControlNetProcessor(controlnet_canny, canny_right),
+            ControlNetProcessor(controlnet_pose, pose_right),
         ],
         generator=generator,
         num_inference_steps=30,
         width=512,
         height=512,
     ).images[0]
-    image.save("/tmp/canny_left_right.png")
+    image.save("/tmp/canny_left_pose_right.png")
 
 
 if __name__ == "__main__":
