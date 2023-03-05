@@ -862,23 +862,36 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
 def main():
     from diffusers.utils import load_image
 
-    controlnet_canny = ControlNetModel.from_pretrained(
-        "fusing/stable-diffusion-v1-5-controlnet-canny", torch_dtype=torch.float16
-    ).to("cuda")
-    controlnet_pose = ControlNetModel.from_pretrained(
-        "fusing/stable-diffusion-v1-5-controlnet-openpose", torch_dtype=torch.float16
-    ).to("cuda")
-
     pipe = StableDiffusionMultiControlNetPipeline.from_pretrained(
         "runwayml/stable-diffusion-v1-5", safety_checker=None, torch_dtype=torch.float16
     ).to("cuda")
     pipe.enable_xformers_memory_efficient_attention()
 
+    controlnet_canny = ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-canny", torch_dtype=torch.float16).to(
+        "cuda"
+    )
+    controlnet_pose = ControlNetModel.from_pretrained(
+        "lllyasviel/sd-controlnet-openpose", torch_dtype=torch.float16
+    ).to("cuda")
+
     canny_left = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/vermeer_left.png")
     canny_right = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/vermeer_right.png")
     pose_right = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/pose_right.png")
 
-    generator = torch.Generator(device="cpu").manual_seed(0)
+    image = pipe(
+        prompt="best quality, extremely detailed",
+        negative_prompt="monochrome, lowres, bad anatomy, worst quality, low quality",
+        processors=[
+            ControlNetProcessor(controlnet_canny, canny_left),
+            ControlNetProcessor(controlnet_canny, canny_right),
+        ],
+        generator=torch.Generator(device="cpu").manual_seed(0),
+        num_inference_steps=30,
+        width=512,
+        height=512,
+    ).images[0]
+    image.save("/tmp/canny_left_right.png")
+
     image = pipe(
         prompt="best quality, extremely detailed",
         negative_prompt="monochrome, lowres, bad anatomy, worst quality, low quality",
@@ -886,7 +899,7 @@ def main():
             ControlNetProcessor(controlnet_canny, canny_left),
             ControlNetProcessor(controlnet_pose, pose_right),
         ],
-        generator=generator,
+        generator=torch.Generator(device="cpu").manual_seed(0),
         num_inference_steps=30,
         width=512,
         height=512,
