@@ -21,9 +21,9 @@ import PIL.Image
 import torch
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
-from ...models import AutoencoderKL, ControlNetModel, UNet2DConditionModel
-from ...schedulers import KarrasDiffusionSchedulers
-from ...utils import (
+from diffusers import AutoencoderKL, ControlNetModel, UNet2DConditionModel
+from diffusers.schedulers import KarrasDiffusionSchedulers
+from diffusers.utils import (
     PIL_INTERPOLATION,
     is_accelerate_available,
     is_accelerate_version,
@@ -31,9 +31,8 @@ from ...utils import (
     randn_tensor,
     replace_example_docstring,
 )
-from ..pipeline_utils import DiffusionPipeline
-from . import StableDiffusionPipelineOutput
-from .safety_checker import StableDiffusionSafetyChecker
+from diffusers.pipeline_utils import DiffusionPipeline
+from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput, StableDiffusionSafetyChecker
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -85,7 +84,7 @@ EXAMPLE_DOC_STRING = """
 """
 
 
-class StableDiffusionControlNetPipeline(DiffusionPipeline):
+class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
     r"""
     Pipeline for text-to-image generation using Stable Diffusion with ControlNet guidance.
 
@@ -818,3 +817,39 @@ class StableDiffusionControlNetPipeline(DiffusionPipeline):
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+
+
+# demo & simple test
+def main():
+    from diffusers.utils import load_image
+
+    controlnet_canny = ControlNetModel.from_pretrained(
+        "fusing/stable-diffusion-v1-5-controlnet-canny", torch_dtype=torch.float16
+    ).to("cuda")
+    controlnet_pose = ControlNetModel.from_pretrained(
+        "fusing/stable-diffusion-v1-5-controlnet-openpose", torch_dtype=torch.float16
+    ).to("cuda")
+
+    pipe = StableDiffusionMultiControlNetPipeline.from_pretrained(
+        "runwayml/stable-diffusion-v1-5", controlnet=controlnet_canny, safety_checker=None, torch_dtype=torch.float16
+    ).to("cuda")
+    pipe.enable_xformers_memory_efficient_attention()
+
+    canny_edged_image = load_image(
+        "https://huggingface.co/takuma104/controlnet_dev/resolve/main/vermeer_canny_edged.png"
+    )
+    openpose_image = load_image("https://huggingface.co/takuma104/controlnet_dev/resolve/main/pose.png")
+
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    image = pipe(
+        prompt="best quality, extremely detailed, football, a boy",
+        negative_prompt="lowres, bad anatomy, worst quality, low quality",
+        image=canny_edged_image,
+        generator=generator,
+        num_inference_steps=30,
+    ).images[0]
+    image.save("/tmp/canny.png")
+
+
+if __name__ == "__main__":
+    main()
