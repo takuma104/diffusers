@@ -42,7 +42,7 @@ class ControlNetProcessor(object):
     def __init__(
         self,
         controlnet: ControlNetModel,
-        image: Union[torch.FloatTensor, PIL.Image.Image, List[torch.FloatTensor], List[PIL.Image.Image]] = None,
+        image: Union[torch.FloatTensor, PIL.Image.Image, List[torch.FloatTensor], List[PIL.Image.Image]],
         conditioning_scale: float = 1.0,
     ):
         self.controlnet = controlnet
@@ -787,17 +787,19 @@ class StableDiffusionMultiControlNetPipeline(DiffusionPipeline):
 
                 # controlnet inference
                 for i, processor in enumerate(processors):
-                    d_samples, m_sample = processor(
+                    down_samples, mid_sample = processor(
                         latent_model_input,
                         t,
                         encoder_hidden_states=prompt_embeds,
                         return_dict=False,
                     )
                     if i == 0:
-                        down_block_res_samples, mid_block_res_sample = d_samples, m_sample
+                        down_block_res_samples, mid_block_res_sample = down_samples, mid_sample
                     else:
-                        down_block_res_samples = [d_ + d for d_, d in zip(down_block_res_samples, d_samples)]
-                        mid_block_res_sample = mid_block_res_sample + m_sample
+                        down_block_res_samples = [
+                            d_prev + d_curr for d_prev, d_curr in zip(down_block_res_samples, down_samples)
+                        ]
+                        mid_block_res_sample = mid_block_res_sample + mid_sample
 
                 # predict the noise residual
                 noise_pred = self.unet(
