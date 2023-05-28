@@ -808,11 +808,13 @@ class LoraLoaderMixin:
             subfolder (`str`, *optional*, defaults to `""`):
                 In case the relevant files are located inside a subfolder of the model repo (either remote in
                 huggingface.co or downloaded locally), you can specify the folder name here.
-
             mirror (`str`, *optional*):
                 Mirror source to accelerate downloads in China. If you are from China and have an accessibility
                 problem, you can set this option to resolve it. Note that we do not guarantee the timeliness or safety.
                 Please refer to the mirror site for more information.
+            text_encoder_modify_forwards(`bool`, *optional*, defaults to `True`):
+                Whether or not to monkey-patch the forward pass of the text encoder to use the LoRA layers.
+                Monkey-patching should only happen once, so set this flag to False if you call this function more than once.
 
         <Tip>
 
@@ -833,6 +835,8 @@ class LoraLoaderMixin:
         subfolder = kwargs.pop("subfolder", None)
         weight_name = kwargs.pop("weight_name", None)
         use_safetensors = kwargs.pop("use_safetensors", None)
+        text_encoder_modify_forwards = kwargs.pop("text_encoder_modify_forwards", True)
+
 
         if use_safetensors and not is_safetensors_available():
             raise ValueError(
@@ -921,7 +925,8 @@ class LoraLoaderMixin:
                 attn_procs_text_encoder = self._load_text_encoder_attn_procs(
                     text_encoder_lora_state_dict, network_alpha=network_alpha
                 )
-                self._modify_text_encoder(attn_procs_text_encoder)
+                if text_encoder_modify_forwards:
+                    self._modify_text_encoder(attn_procs_text_encoder)
 
                 # save lora attn procs of text encoder so that it can be easily retrieved
                 self._text_encoder_lora_attn_procs = attn_procs_text_encoder
