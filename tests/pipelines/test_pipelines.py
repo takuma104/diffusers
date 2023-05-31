@@ -20,6 +20,7 @@ import random
 import shutil
 import sys
 import tempfile
+import traceback
 import unittest
 import unittest.mock as mock
 
@@ -35,6 +36,7 @@ from transformers import CLIPImageProcessor, CLIPModel, CLIPTextConfig, CLIPText
 
 from diffusers import (
     AutoencoderKL,
+    ConfigMixin,
     DDIMPipeline,
     DDIMScheduler,
     DDPMPipeline,
@@ -44,6 +46,7 @@ from diffusers import (
     EulerAncestralDiscreteScheduler,
     EulerDiscreteScheduler,
     LMSDiscreteScheduler,
+    ModelMixin,
     PNDMScheduler,
     StableDiffusionImg2ImgPipeline,
     StableDiffusionInpaintPipelineLegacy,
@@ -71,10 +74,63 @@ from diffusers.utils.testing_utils import (
     require_compel,
     require_flax,
     require_torch_gpu,
+    run_test_in_subprocess,
 )
 
 
 enable_full_determinism()
+
+
+# Will be run via run_test_in_subprocess
+def _test_from_save_pretrained_dynamo(in_queue, out_queue, timeout):
+    error = None
+    try:
+        # 1. Load models
+        model = UNet2DModel(
+            block_out_channels=(32, 64),
+            layers_per_block=2,
+            sample_size=32,
+            in_channels=3,
+            out_channels=3,
+            down_block_types=("DownBlock2D", "AttnDownBlock2D"),
+            up_block_types=("AttnUpBlock2D", "UpBlock2D"),
+        )
+        model = torch.compile(model)
+        scheduler = DDPMScheduler(num_train_timesteps=10)
+
+        ddpm = DDPMPipeline(model, scheduler)
+        ddpm.to(torch_device)
+        ddpm.set_progress_bar_config(disable=None)
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            ddpm.save_pretrained(tmpdirname)
+            new_ddpm = DDPMPipeline.from_pretrained(tmpdirname)
+            new_ddpm.to(torch_device)
+
+        generator = torch.Generator(device=torch_device).manual_seed(0)
+        image = ddpm(generator=generator, num_inference_steps=5, output_type="numpy").images
+
+        generator = torch.Generator(device=torch_device).manual_seed(0)
+        new_image = new_ddpm(generator=generator, num_inference_steps=5, output_type="numpy").images
+
+        assert np.abs(image - new_image).sum() < 1e-5, "Models don't give the same forward pass"
+    except Exception:
+        error = f"{traceback.format_exc()}"
+
+    results = {"error": error}
+    out_queue.put(results, timeout=timeout)
+    out_queue.join()
+
+
+class CustomEncoder(ModelMixin, ConfigMixin):
+    def __init__(self):
+        super().__init__()
+
+
+class CustomPipeline(DiffusionPipeline):
+    def __init__(self, encoder: CustomEncoder, scheduler: DDIMScheduler):
+        super().__init__()
+        self.register_modules(encoder=encoder, scheduler=scheduler)
 
 
 class DownloadTests(unittest.TestCase):
@@ -340,7 +396,7 @@ class DownloadTests(unittest.TestCase):
         with mock.patch("requests.request", return_value=response_mock):
             # Download this model to make sure it's in the cache.
             pipe = StableDiffusionPipeline.from_pretrained(
-                "hf-internal-testing/tiny-stable-diffusion-torch", safety_checker=None, local_files_only=True
+                "hf-internal-testing/tiny-stable-diffusion-torch", safety_checker=None
             )
             comps = {k: v for k, v in pipe.components.items() if hasattr(v, "parameters")}
 
@@ -607,6 +663,65 @@ class DownloadTests(unittest.TestCase):
                 out = pipe(prompt, num_inference_steps=1, output_type="numpy").images
                 assert out.shape == (1, 128, 128, 3)
 
+        # single token state dict load
+        ten = {"<x>": torch.ones((32,))}
+        pipe.load_textual_inversion(ten)
+
+        token = pipe.tokenizer.convert_tokens_to_ids("<x>")
+        assert token == num_tokens + 10, "Added token must be at spot `num_tokens`"
+        assert pipe.text_encoder.get_input_embeddings().weight[-1].sum().item() == 32
+        assert pipe._maybe_convert_prompt("<x>", pipe.tokenizer) == "<x>"
+
+        prompt = "hey <x>"
+        out = pipe(prompt, num_inference_steps=1, output_type="numpy").images
+        assert out.shape == (1, 128, 128, 3)
+
+        # multi embedding state dict load
+        ten1 = {"<xxxxx>": torch.ones((32,))}
+        ten2 = {"<xxxxxx>": 2 * torch.ones((1, 32))}
+
+        pipe.load_textual_inversion([ten1, ten2])
+
+        token = pipe.tokenizer.convert_tokens_to_ids("<xxxxx>")
+        assert token == num_tokens + 11, "Added token must be at spot `num_tokens`"
+        assert pipe.text_encoder.get_input_embeddings().weight[-2].sum().item() == 32
+        assert pipe._maybe_convert_prompt("<xxxxx>", pipe.tokenizer) == "<xxxxx>"
+
+        token = pipe.tokenizer.convert_tokens_to_ids("<xxxxxx>")
+        assert token == num_tokens + 12, "Added token must be at spot `num_tokens`"
+        assert pipe.text_encoder.get_input_embeddings().weight[-1].sum().item() == 64
+        assert pipe._maybe_convert_prompt("<xxxxxx>", pipe.tokenizer) == "<xxxxxx>"
+
+        prompt = "hey <xxxxx> <xxxxxx>"
+        out = pipe(prompt, num_inference_steps=1, output_type="numpy").images
+        assert out.shape == (1, 128, 128, 3)
+
+        # auto1111 multi-token state dict load
+        ten = {
+            "string_to_param": {
+                "*": torch.cat([3 * torch.ones((1, 32)), 4 * torch.ones((1, 32)), 5 * torch.ones((1, 32))])
+            },
+            "name": "<xxxx>",
+        }
+
+        pipe.load_textual_inversion(ten)
+
+        token = pipe.tokenizer.convert_tokens_to_ids("<xxxx>")
+        token_1 = pipe.tokenizer.convert_tokens_to_ids("<xxxx>_1")
+        token_2 = pipe.tokenizer.convert_tokens_to_ids("<xxxx>_2")
+
+        assert token == num_tokens + 13, "Added token must be at spot `num_tokens`"
+        assert token_1 == num_tokens + 14, "Added token must be at spot `num_tokens`"
+        assert token_2 == num_tokens + 15, "Added token must be at spot `num_tokens`"
+        assert pipe.text_encoder.get_input_embeddings().weight[-3].sum().item() == 96
+        assert pipe.text_encoder.get_input_embeddings().weight[-2].sum().item() == 128
+        assert pipe.text_encoder.get_input_embeddings().weight[-1].sum().item() == 160
+        assert pipe._maybe_convert_prompt("<xxxx>", pipe.tokenizer) == "<xxxx> <xxxx>_1 <xxxx>_2"
+
+        prompt = "hey <xxxx>"
+        out = pipe(prompt, num_inference_steps=1, output_type="numpy").images
+        assert out.shape == (1, 128, 128, 3)
+
     def test_download_ignore_files(self):
         # Check https://huggingface.co/hf-internal-testing/tiny-stable-diffusion-pipe-ignore-files/blob/72f58636e5508a218c6b3f60550dc96445547817/model_index.json#L4
         with tempfile.TemporaryDirectory() as tmpdirname:
@@ -694,6 +809,20 @@ class CustomPipelineTests(unittest.TestCase):
         assert images[0].shape == (1, 32, 32, 3)
         # compare to https://github.com/huggingface/diffusers/blob/main/tests/fixtures/custom_pipeline/pipeline.py#L102
         assert output_str == "This is a local test"
+
+    def test_custom_model_and_pipeline(self):
+        pipe = CustomPipeline(
+            encoder=CustomEncoder(),
+            scheduler=DDIMScheduler(),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            pipe.save_pretrained(tmpdirname)
+
+            pipe_new = CustomPipeline.from_pretrained(tmpdirname)
+            pipe_new.save_pretrained(tmpdirname)
+
+        assert dict(pipe_new.config) == dict(pipe.config)
 
     @slow
     @require_torch_gpu
@@ -1315,35 +1444,7 @@ class PipelineSlowTests(unittest.TestCase):
 
     @require_torch_2
     def test_from_save_pretrained_dynamo(self):
-        # 1. Load models
-        model = UNet2DModel(
-            block_out_channels=(32, 64),
-            layers_per_block=2,
-            sample_size=32,
-            in_channels=3,
-            out_channels=3,
-            down_block_types=("DownBlock2D", "AttnDownBlock2D"),
-            up_block_types=("AttnUpBlock2D", "UpBlock2D"),
-        )
-        model = torch.compile(model)
-        scheduler = DDPMScheduler(num_train_timesteps=10)
-
-        ddpm = DDPMPipeline(model, scheduler)
-        ddpm.to(torch_device)
-        ddpm.set_progress_bar_config(disable=None)
-
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            ddpm.save_pretrained(tmpdirname)
-            new_ddpm = DDPMPipeline.from_pretrained(tmpdirname)
-            new_ddpm.to(torch_device)
-
-        generator = torch.Generator(device=torch_device).manual_seed(0)
-        image = ddpm(generator=generator, num_inference_steps=5, output_type="numpy").images
-
-        generator = torch.Generator(device=torch_device).manual_seed(0)
-        new_image = new_ddpm(generator=generator, num_inference_steps=5, output_type="numpy").images
-
-        assert np.abs(image - new_image).sum() < 1e-5, "Models don't give the same forward pass"
+        run_test_in_subprocess(test_case=self, target_func=_test_from_save_pretrained_dynamo, inputs=None)
 
     def test_from_pretrained_hub(self):
         model_path = "google/ddpm-cifar10-32"

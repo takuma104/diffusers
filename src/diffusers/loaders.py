@@ -27,7 +27,9 @@ from .models.attention_processor import (
     CustomDiffusionXFormersAttnProcessor,
     LoRAAttnAddedKVProcessor,
     LoRAAttnProcessor,
+    LoRAXFormersAttnProcessor,
     SlicedAttnAddedKVProcessor,
+    XFormersAttnProcessor,
 )
 from .utils import (
     DIFFUSERS_CACHE,
@@ -180,6 +182,8 @@ class UNet2DConditionLoadersMixin:
         subfolder = kwargs.pop("subfolder", None)
         weight_name = kwargs.pop("weight_name", None)
         use_safetensors = kwargs.pop("use_safetensors", None)
+        # This value has the same meaning as the `--network_alpha` option in the kohya-ss trainer script.
+        # See https://github.com/darkstorm2150/sd-scripts/blob/main/docs/train_network_README-en.md#execute-learning
         network_alpha = kwargs.pop("network_alpha", None)
 
         if use_safetensors and not is_safetensors_available():
@@ -280,7 +284,10 @@ class UNet2DConditionLoadersMixin:
                     attn_processor_class = LoRAAttnAddedKVProcessor
                 else:
                     cross_attention_dim = value_dict["to_k_lora.down.weight"].shape[1]
-                    attn_processor_class = LoRAAttnProcessor
+                    if isinstance(attn_processor, (XFormersAttnProcessor, LoRAXFormersAttnProcessor)):
+                        attn_processor_class = LoRAXFormersAttnProcessor
+                    else:
+                        attn_processor_class = LoRAAttnProcessor
 
                 attn_processors[key] = attn_processor_class(
                     hidden_size=hidden_size,
@@ -469,7 +476,7 @@ class TextualInversionLoaderMixin:
 
     def load_textual_inversion(
         self,
-        pretrained_model_name_or_path: Union[str, List[str]],
+        pretrained_model_name_or_path: Union[str, List[str], Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]]],
         token: Optional[Union[str, List[str]]] = None,
         **kwargs,
     ):
@@ -484,7 +491,7 @@ class TextualInversionLoaderMixin:
         </Tip>
 
         Parameters:
-            pretrained_model_name_or_path (`str` or `os.PathLike` or `List[str or os.PathLike]`):
+            pretrained_model_name_or_path (`str` or `os.PathLike` or `List[str or os.PathLike]` or `Dict` or `List[Dict]`):
                 Can be either:
 
                     - A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
@@ -493,6 +500,8 @@ class TextualInversionLoaderMixin:
                     - A path to a *directory* containing textual inversion weights, e.g.
                       `./my_text_inversion_directory/`.
                     - A path to a *file* containing textual inversion weights, e.g. `./my_text_inversions.pt`.
+                    - A [torch state
+                      dict](https://pytorch.org/tutorials/beginner/saving_loading_models.html#what-is-a-state-dict).
 
                 Or a list of those elements.
             token (`str` or `List[str]`, *optional*):
@@ -617,7 +626,7 @@ class TextualInversionLoaderMixin:
             "framework": "pytorch",
         }
 
-        if isinstance(pretrained_model_name_or_path, str):
+        if not isinstance(pretrained_model_name_or_path, list):
             pretrained_model_name_or_paths = [pretrained_model_name_or_path]
         else:
             pretrained_model_name_or_paths = pretrained_model_name_or_path
@@ -642,16 +651,38 @@ class TextualInversionLoaderMixin:
         token_ids_and_embeddings = []
 
         for pretrained_model_name_or_path, token in zip(pretrained_model_name_or_paths, tokens):
-            # 1. Load textual inversion file
-            model_file = None
-            # Let's first try to load .safetensors weights
-            if (use_safetensors and weight_name is None) or (
-                weight_name is not None and weight_name.endswith(".safetensors")
-            ):
-                try:
+            if not isinstance(pretrained_model_name_or_path, dict):
+                # 1. Load textual inversion file
+                model_file = None
+                # Let's first try to load .safetensors weights
+                if (use_safetensors and weight_name is None) or (
+                    weight_name is not None and weight_name.endswith(".safetensors")
+                ):
+                    try:
+                        model_file = _get_model_file(
+                            pretrained_model_name_or_path,
+                            weights_name=weight_name or TEXT_INVERSION_NAME_SAFE,
+                            cache_dir=cache_dir,
+                            force_download=force_download,
+                            resume_download=resume_download,
+                            proxies=proxies,
+                            local_files_only=local_files_only,
+                            use_auth_token=use_auth_token,
+                            revision=revision,
+                            subfolder=subfolder,
+                            user_agent=user_agent,
+                        )
+                        state_dict = safetensors.torch.load_file(model_file, device="cpu")
+                    except Exception as e:
+                        if not allow_pickle:
+                            raise e
+
+                        model_file = None
+
+                if model_file is None:
                     model_file = _get_model_file(
                         pretrained_model_name_or_path,
-                        weights_name=weight_name or TEXT_INVERSION_NAME_SAFE,
+                        weights_name=weight_name or TEXT_INVERSION_NAME,
                         cache_dir=cache_dir,
                         force_download=force_download,
                         resume_download=resume_download,
@@ -662,30 +693,12 @@ class TextualInversionLoaderMixin:
                         subfolder=subfolder,
                         user_agent=user_agent,
                     )
-                    state_dict = safetensors.torch.load_file(model_file, device="cpu")
-                except Exception as e:
-                    if not allow_pickle:
-                        raise e
-
-                    model_file = None
-
-            if model_file is None:
-                model_file = _get_model_file(
-                    pretrained_model_name_or_path,
-                    weights_name=weight_name or TEXT_INVERSION_NAME,
-                    cache_dir=cache_dir,
-                    force_download=force_download,
-                    resume_download=resume_download,
-                    proxies=proxies,
-                    local_files_only=local_files_only,
-                    use_auth_token=use_auth_token,
-                    revision=revision,
-                    subfolder=subfolder,
-                    user_agent=user_agent,
-                )
-                state_dict = torch.load(model_file, map_location="cpu")
+                    state_dict = torch.load(model_file, map_location="cpu")
+            else:
+                state_dict = pretrained_model_name_or_path
 
             # 2. Load token and embedding correcly from file
+            loaded_token = None
             if isinstance(state_dict, torch.Tensor):
                 if token is None:
                     raise ValueError(
@@ -899,7 +912,7 @@ class LoraLoaderMixin:
 
         # Convert kohya-ss Style LoRA attn procs to diffusers attn procs
         network_alpha = None
-        if any("alpha" in k for k in state_dict.keys()):
+        if all((k.startswith("lora_te_") or k.startswith("lora_unet_")) for k in state_dict.keys()):
             state_dict, network_alpha = self._convert_kohya_lora_to_diffusers(state_dict)
 
         # If the serialization format is new (introduced in https://github.com/huggingface/diffusers/pull/2918),
