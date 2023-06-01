@@ -299,35 +299,45 @@ class LoraLoaderMixinTests(unittest.TestCase):
             outputs_without_lora, outputs_with_lora
         ), "lora_up_weight are not zero, so the lora outputs should be different to without lora outputs"
 
-    def test_text_encoder_lora_monkey_patch_twice(self):
+    def test_text_encoder_lora_remove_monkey_patch(self):
         pipeline_components, _ = self.get_dummy_components()
         pipe = StableDiffusionPipeline(**pipeline_components)
+
         dummy_tokens = self.get_dummy_tokens()
 
-        def inference_lora_with_seed(seed):
-            # create lora_attn_procs with seed
-            text_attn_procs = create_text_encoder_lora_attn_procs(pipe.text_encoder)
-            torch.manual_seed(seed)
-            set_lora_up_weights(text_attn_procs, randn_weight=True)
+        # inference without lora
+        outputs_without_lora = pipe.text_encoder(**dummy_tokens)[0]
+        assert outputs_without_lora.shape == (1, 77, 32)
 
-            # monkey patch
-            pipe._modify_text_encoder(text_attn_procs)
+        # create lora_attn_procs with randn up.weights
+        text_attn_procs = create_text_encoder_lora_attn_procs(pipe.text_encoder)
+        set_lora_up_weights(text_attn_procs, randn_weight=True)
 
-            # verify that it's okay to release the text_attn_procs which holds the LoRAAttnProcessor.
-            del text_attn_procs
-            gc.collect()
+        # monkey patch
+        pipe._modify_text_encoder(text_attn_procs)
 
-            # inference with lora
-            outputs = pipe.text_encoder(**dummy_tokens)[0]
-            assert outputs.shape == (1, 77, 32)
-            return outputs
+        # verify that it's okay to release the text_attn_procs which holds the LoRAAttnProcessor.
+        del text_attn_procs
+        gc.collect()
 
-        outputs_seed0 = inference_lora_with_seed(0)
-        outputs_seed0_again = inference_lora_with_seed(0)
+        # inference with lora
+        outputs_with_lora = pipe.text_encoder(**dummy_tokens)[0]
+        assert outputs_with_lora.shape == (1, 77, 32)
+
+        assert not torch.allclose(
+            outputs_without_lora, outputs_with_lora
+        ), "lora outputs should be different to without lora outputs"
+
+        # remove monkey patch
+        pipe._remove_text_encoder_monkey_patch()
+
+        # inference with lora
+        outputs_without_lora_removed = pipe.text_encoder(**dummy_tokens)[0]
+        assert outputs_without_lora_removed.shape == (1, 77, 32)
 
         assert torch.allclose(
-            outputs_seed0, outputs_seed0_again
-        ), "outputs should be the same when the seed is the same"
+            outputs_without_lora, outputs_without_lora_removed
+        ), "remove lora monkey patch should restore the original outputs"
 
     def create_lora_weight_file(self, tmpdirname, lora_up_seed=None):
         _, lora_components = self.get_dummy_components()
