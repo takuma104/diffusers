@@ -23,53 +23,8 @@ from ..models.embeddings import ImagePositionalEmbeddings
 from ..utils import BaseOutput, deprecate
 from .attention import BasicTransformerBlock
 from .embeddings import PatchEmbed
+from .lora import Conv2dWithLoRA
 from .modeling_utils import ModelMixin
-
-
-class LoRAConv2dLayer(nn.Module):
-    def __init__(self, in_features, out_features, rank=4, network_alpha=None):
-        super().__init__()
-
-        if rank > min(in_features, out_features):
-            raise ValueError(f"LoRA rank {rank} must be less or equal than {min(in_features, out_features)}")
-
-        self.down = nn.Conv2d(in_features, rank, (1, 1), (1, 1), bias=False)
-        self.up = nn.Conv2d(rank, out_features, (1, 1), (1, 1), bias=False)
-        # This value has the same meaning as the `--network_alpha` option in the kohya-ss trainer script.
-        # See https://github.com/darkstorm2150/sd-scripts/blob/main/docs/train_network_README-en.md#execute-learning
-        self.network_alpha = network_alpha
-        self.rank = rank
-
-        nn.init.normal_(self.down.weight, std=1 / rank)
-        nn.init.zeros_(self.up.weight)
-
-    def forward(self, hidden_states):
-        orig_dtype = hidden_states.dtype
-        dtype = self.down.weight.dtype
-
-        down_hidden_states = self.down(hidden_states.to(dtype))
-        up_hidden_states = self.up(down_hidden_states)
-
-        if self.network_alpha is not None:
-            up_hidden_states *= self.network_alpha / self.rank
-
-        return up_hidden_states.to(orig_dtype)
-
-
-class LoRAConv2d(nn.Conv2d):
-    """
-    A convolutional layer that can be used with LoRA.
-    """
-
-    def __init__(self, *args, lora_layer: Optional[LoRAConv2dLayer] = None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.lora_layer = lora_layer
-
-    def forward(self, x):
-        if self.lora_layer is None:
-            return super().forward(x)
-        else:
-            return super().forward(x) + self.lora_layer(x)
 
 
 @dataclass
@@ -192,7 +147,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
             if use_linear_projection:
                 self.proj_in = nn.Linear(in_channels, inner_dim)
             else:
-                self.proj_in = LoRAConv2d(in_channels, inner_dim, kernel_size=1, stride=1, padding=0)
+                self.proj_in = Conv2dWithLoRA(in_channels, inner_dim, kernel_size=1, stride=1, padding=0)
         elif self.is_input_vectorized:
             assert sample_size is not None, "Transformer2DModel over discrete input must provide sample_size"
             assert num_vector_embeds is not None, "Transformer2DModel over discrete input must provide num_embed"
@@ -248,7 +203,7 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
             if use_linear_projection:
                 self.proj_out = nn.Linear(inner_dim, in_channels)
             else:
-                self.proj_out = LoRAConv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
+                self.proj_out = Conv2dWithLoRA(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
         elif self.is_input_vectorized:
             self.norm_out = nn.LayerNorm(inner_dim)
             self.out = nn.Linear(inner_dim, self.num_vector_embeds - 1)

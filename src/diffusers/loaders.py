@@ -31,7 +31,7 @@ from .models.attention_processor import (
     SlicedAttnAddedKVProcessor,
     XFormersAttnProcessor,
 )
-from .models.transformer_2d import LoRAConv2dLayer
+from .models.lora import Conv2dWithLoRA, LinearWithLoRA, LoRAConv2dLayer, LoRALinearLayer
 from .utils import (
     DIFFUSERS_CACHE,
     HF_HUB_OFFLINE,
@@ -423,13 +423,27 @@ class UNet2DConditionLoadersMixin:
             rank = value_dict["lora.down.weight"].shape[0]
             hidden_size = value_dict["lora.up.weight"].shape[0]
             target_modules = [module for name, module in self.named_modules() if name == key]
-            assert len(target_modules) == 1
-            # print(key, target_modules, rank, hidden_size)
-            # TODO: detect whether the module is a linear module or a conv2d module
-            lora = LoRAConv2dLayer(hidden_size, hidden_size, rank, network_alpha)
-            lora.load_state_dict({k.replace("lora.", ""): v for k, v in value_dict.items()})
+            if len(target_modules) == 0:
+                logger.warning(f"Could not find module {key} in the model. Skipping.")
+                continue
+
+            print(key, target_modules, rank, hidden_size)
+
+            target_module = target_modules[0]
+            value_dict = {k.replace("lora.", ""): v for k, v in value_dict.items()}
+
+            lora = None
+            if isinstance(target_module, Conv2dWithLoRA):
+                lora = LoRAConv2dLayer(hidden_size, hidden_size, rank, network_alpha)
+            elif isinstance(target_module, LinearWithLoRA):
+                lora = LoRALinearLayer(hidden_size, hidden_size, rank, network_alpha)
+            else:
+                raise ValueError(f"Module {key} is not a Conv2dWithLoRA or LinearWithLoRA module.")
+            lora.load_state_dict(value_dict)
             lora.to(device=self.device, dtype=self.dtype)
-            target_modules[0].lora_layer = lora
+
+            # install lora
+            target_module.lora_layer = lora
 
 
 class TextualInversionLoaderMixin:
@@ -1299,7 +1313,6 @@ class LoraLoaderMixin:
                     diffusers_name = diffusers_name.replace("to.out.0.lora", "to_out_lora")
                     diffusers_name = diffusers_name.replace("proj.in", "proj_in")
                     diffusers_name = diffusers_name.replace("proj.out", "proj_out")
-                    diffusers_name = diffusers_name.replace("ff.net", "ff_net")
                     if "transformer_blocks" in diffusers_name:
                         if "attn1" in diffusers_name or "attn2" in diffusers_name:
                             diffusers_name = diffusers_name.replace("attn1", "attn1.processor")
