@@ -413,7 +413,7 @@ class UNet2DConditionLoadersMixin:
         logger.info(f"Model weights saved in {os.path.join(save_directory, weight_name)}")
 
     def _load_lora_aux(self, state_dict, network_alpha=None):
-        # print("\n".join(sorted(state_dict.keys())))
+        print("\n".join(sorted(state_dict.keys())))
         lora_grouped_dict = defaultdict(dict)
         for key, value in state_dict.items():
             attn_processor_key, sub_key = ".".join(key.split(".")[:-3]), ".".join(key.split(".")[-3:])
@@ -427,7 +427,7 @@ class UNet2DConditionLoadersMixin:
                 logger.warning(f"Could not find module {key} in the model. Skipping.")
                 continue
 
-            print(key, target_modules, rank, hidden_size)
+            # print(key, target_modules, rank, hidden_size)
 
             target_module = target_modules[0]
             value_dict = {k.replace("lora.", ""): v for k, v in value_dict.items()}
@@ -436,7 +436,7 @@ class UNet2DConditionLoadersMixin:
             if isinstance(target_module, Conv2dWithLoRA):
                 lora = LoRAConv2dLayer(hidden_size, hidden_size, rank, network_alpha)
             elif isinstance(target_module, LinearWithLoRA):
-                lora = LoRALinearLayer(hidden_size, hidden_size, rank, network_alpha)
+                lora = LoRALinearLayer(target_module.in_features, target_module.out_features, rank, network_alpha)
             else:
                 raise ValueError(f"Module {key} is not a Conv2dWithLoRA or LinearWithLoRA module.")
             lora.load_state_dict(value_dict)
@@ -1319,7 +1319,10 @@ class LoraLoaderMixin:
                             diffusers_name = diffusers_name.replace("attn2", "attn2.processor")
                             unet_state_dict[diffusers_name] = value
                             unet_state_dict[diffusers_name.replace(".down.", ".up.")] = state_dict[lora_name_up]
-                    elif any(key in diffusers_name for key in ("proj_in", "proj_out", "ff_net")):
+                        elif "ff" in diffusers_name:
+                            unet_state_dict_aux[diffusers_name] = value
+                            unet_state_dict_aux[diffusers_name.replace(".down.", ".up.")] = state_dict[lora_name_up]
+                    elif any(key in diffusers_name for key in ("proj_in", "proj_out")):
                         unet_state_dict_aux[diffusers_name] = value
                         unet_state_dict_aux[diffusers_name.replace(".down.", ".up.")] = state_dict[lora_name_up]
                 elif lora_name.startswith("lora_te_"):

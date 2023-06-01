@@ -240,7 +240,7 @@ class GELU(nn.Module):
 
     def __init__(self, dim_in: int, dim_out: int, approximate: str = "none"):
         super().__init__()
-        self.proj = LinearWithLoRA(dim_in, dim_out)
+        self.proj = nn.Linear(dim_in, dim_out)
         self.approximate = approximate
 
     def gelu(self, gate):
@@ -266,7 +266,7 @@ class GEGLU(nn.Module):
 
     def __init__(self, dim_in: int, dim_out: int):
         super().__init__()
-        self.proj = nn.Linear(dim_in, dim_out * 2)
+        self.proj = LinearWithLoRA(dim_in, dim_out * 2)
 
     def gelu(self, gate):
         if gate.device.type != "mps":
