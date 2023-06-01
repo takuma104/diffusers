@@ -331,7 +331,7 @@ class LoraLoaderMixinTests(unittest.TestCase):
         # remove monkey patch
         pipe._remove_text_encoder_monkey_patch()
 
-        # inference with lora
+        # inference with removed lora
         outputs_without_lora_removed = pipe.text_encoder(**dummy_tokens)[0]
         assert outputs_without_lora_removed.shape == (1, 77, 32)
 
