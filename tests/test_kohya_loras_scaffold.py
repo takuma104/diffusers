@@ -10,6 +10,7 @@ import math
 import numpy as np
 import safetensors
 import torch
+import torch.nn as nn
 from PIL import Image
 
 from diffusers import DiffusionPipeline, DPMSolverMultistepScheduler, StableDiffusionPipeline
@@ -21,7 +22,7 @@ class LoRAModule(torch.nn.Module):
         """if alpha == 0 or None, alpha is rank (no scaling)."""
         super().__init__()
 
-        if org_module.__class__.__name__ == "Conv2d":
+        if isinstance(org_module, nn.Conv2d):
             in_dim = org_module.in_channels
             out_dim = org_module.out_channels
         else:
@@ -30,7 +31,7 @@ class LoRAModule(torch.nn.Module):
 
         self.lora_dim = lora_dim
 
-        if org_module.__class__.__name__ == "Conv2d":
+        if isinstance(org_module, nn.Conv2d):
             kernel_size = org_module.kernel_size
             stride = org_module.stride
             padding = org_module.padding
@@ -72,20 +73,18 @@ class LoRAModuleContainer(torch.nn.Module):
                 alpha = None
                 if lora_name_alpha in state_dict:
                     alpha = state_dict[lora_name_alpha].item()
-                if lora_name in hooks:
-                    hook = hooks[lora_name]
-                    lora_module = LoRAModule(hook.orig_module, lora_dim=lora_dim, alpha=alpha, multiplier=multiplier)
-                    self.register_module(lora_name, lora_module)
+                hook = hooks[lora_name]
+                lora_module = LoRAModule(hook.orig_module, lora_dim=lora_dim, alpha=alpha, multiplier=multiplier)
+                self.register_module(lora_name, lora_module)
 
         # Load whole LoRA weights
-        self.load_state_dict(state_dict, strict=False)
+        self.load_state_dict(state_dict)
 
         # Register LoRAModule to LoRAHook
         for name, module in self.named_modules():
             if module.__class__.__name__ == "LoRAModule":
-                if name in hooks:
-                    hook = hooks[name]
-                    hook.append_lora(module)
+                hook = hooks[name]
+                hook.append_lora(module)
 
     @property
     def alpha(self):
@@ -155,10 +154,9 @@ class LoRAHookInjector(object):
                 module.__class__.__name__ in target_replace_modules and "transformer_blocks" not in name
             ):  # to adapt latest diffusers:
                 for child_name, child_module in module.named_modules():
-                    is_linear = child_module.__class__.__name__ == "Linear"
-                    is_conv2d = child_module.__class__.__name__ == "Conv2d"
-                    # if is_linear or is_conv2d:
-                    if is_linear and not is_conv2d and "ff.net" not in child_name:
+                    is_linear = isinstance(child_module, nn.Linear)
+                    is_conv2d = isinstance(child_module, nn.Conv2d)
+                    if is_linear or is_conv2d:
                         lora_name = prefix + "." + name + "." + child_name
                         lora_name = lora_name.replace(".", "_")
                         target_modules.append((lora_name, child_module))
@@ -167,11 +165,8 @@ class LoRAHookInjector(object):
     def install_hooks(self, pipe):
         """Install LoRAHook to the pipe."""
         assert len(self.hooks) == 0
-        # text_encoder_targets = self._get_target_modules(pipe.text_encoder, "lora_te", ["CLIPAttention", "CLIPMLP"])
-        # unet_targets = self._get_target_modules(pipe.unet, "lora_unet", ["Transformer2DModel", "Attention"])
-        text_encoder_targets = self._get_target_modules(pipe.text_encoder, "lora_te", ["CLIPAttention"])
-        unet_targets = self._get_target_modules(pipe.unet, "lora_unet", ["Transformer2DModel"])
-
+        text_encoder_targets = self._get_target_modules(pipe.text_encoder, "lora_te", ["CLIPAttention", "CLIPMLP"])
+        unet_targets = self._get_target_modules(pipe.unet, "lora_unet", ["Transformer2DModel", "Attention"])
         for name, target_module in text_encoder_targets + unet_targets:
             hook = LoRAHook()
             hook.install(target_module)
@@ -248,40 +243,40 @@ if __name__ == "__main__":
     )
     lora_fn = "../stable-diffusion-study/models/lora/light_and_shadow.safetensors"
 
-    # # Without Lora
-    # images = pipe(
-    #     prompt=prompt,
-    #     negative_prompt=negative_prompt,
-    #     width=512,
-    #     height=768,
-    #     num_inference_steps=15,
-    #     num_images_per_prompt=4,
-    #     generator=torch.manual_seed(0),
-    # ).images
-    # image_grid(images, 1, 4).save("test_orig.png")
+    # Without Lora
+    images = pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        width=512,
+        height=768,
+        num_inference_steps=15,
+        num_images_per_prompt=4,
+        generator=torch.manual_seed(0),
+    ).images
+    image_grid(images, 1, 4).save("test_orig.png")
 
-    # mem_bytes = torch.cuda.max_memory_allocated()
-    # torch.cuda.reset_peak_memory_stats()
-    # print(f"Without Lora -> {mem_bytes/(10**6)}MB")
+    mem_bytes = torch.cuda.max_memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    print(f"Without Lora -> {mem_bytes/(10**6)}MB")
 
-    # # Hook version (some restricted apply)
-    # install_lora_hook(pipe)
-    # pipe.apply_lora(lora_fn)
-    # images = pipe(
-    #     prompt=prompt,
-    #     negative_prompt=negative_prompt,
-    #     width=512,
-    #     height=768,
-    #     num_inference_steps=15,
-    #     num_images_per_prompt=4,
-    #     generator=torch.manual_seed(0),
-    # ).images
-    # image_grid(images, 1, 4).save("test_lora_hook.png")
-    # uninstall_lora_hook(pipe)
+    # Hook version (some restricted apply)
+    install_lora_hook(pipe)
+    pipe.apply_lora(lora_fn)
+    images = pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        width=512,
+        height=768,
+        num_inference_steps=15,
+        num_images_per_prompt=4,
+        generator=torch.manual_seed(0),
+    ).images
+    image_grid(images, 1, 4).save("test_lora_hook.png")
+    uninstall_lora_hook(pipe)
 
-    # mem_bytes = torch.cuda.max_memory_allocated()
-    # torch.cuda.reset_peak_memory_stats()
-    # print(f"Hook version -> {mem_bytes/(10**6)}MB")
+    mem_bytes = torch.cuda.max_memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    print(f"Hook version -> {mem_bytes/(10**6)}MB")
 
     # Diffusers dev version
     pipe.load_lora_weights(lora_fn)
