@@ -959,7 +959,7 @@ class LoraLoaderMixin:
             if any(x in name for x in TEXT_ENCODER_TARGET_MODULES):
                 module = self.text_encoder.get_submodule(name)
                 if hasattr(module, "old_forward"):
-                    # remove monkey-patch
+                    # restore original `forward` to remove monkey-patch
                     module.forward = module.old_forward
                     delattr(module, "old_forward")
 
