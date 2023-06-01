@@ -413,7 +413,7 @@ class UNet2DConditionLoadersMixin:
         logger.info(f"Model weights saved in {os.path.join(save_directory, weight_name)}")
 
     def _load_lora_aux(self, state_dict, network_alpha=None):
-        print("\n".join(sorted(state_dict.keys())))
+        # print("\n".join(sorted(state_dict.keys())))
         lora_grouped_dict = defaultdict(dict)
         for key, value in state_dict.items():
             attn_processor_key, sub_key = ".".join(key.split(".")[:-3]), ".".join(key.split(".")[-3:])
@@ -947,7 +947,7 @@ class LoraLoaderMixin:
                 state_dict
             )
             self.unet._load_lora_aux(unet_state_dict_aux, network_alpha=network_alpha)
-            # TODO: te_state_dict_aux handling
+            self._load_lora_aux_for_text_encoder(te_state_dict_aux, network_alpha=network_alpha)
 
         # If the serialization format is new (introduced in https://github.com/huggingface/diffusers/pull/2918),
         # then the `state_dict` keys should have `self.unet_name` and/or `self.text_encoder_name` as
@@ -1344,6 +1344,39 @@ class LoraLoaderMixin:
         te_state_dict = {f"{TEXT_ENCODER_NAME}.{module_name}": params for module_name, params in te_state_dict.items()}
         new_state_dict = {**unet_state_dict, **te_state_dict}
         return new_state_dict, unet_state_dict_aux, te_state_dict_aux, network_alpha
+
+    def _load_lora_aux_for_text_encoder(self, state_dict, network_alpha=None):
+        # print("\n".join(sorted(state_dict.keys())))
+        lora_grouped_dict = defaultdict(dict)
+        for key, value in state_dict.items():
+            attn_processor_key, sub_key = ".".join(key.split(".")[:-3]), ".".join(key.split(".")[-3:])
+            lora_grouped_dict[attn_processor_key][sub_key] = value
+
+        for key, value_dict in lora_grouped_dict.items():
+            rank = value_dict["lora.down.weight"].shape[0]
+            target_modules = [module for name, module in self.text_encoder.named_modules() if name == key]
+            if len(target_modules) == 0:
+                logger.warning(f"Could not find module {key} in the model. Skipping.")
+                continue
+
+            # print(key, target_modules, rank, hidden_size)
+
+            target_module = target_modules[0]
+            value_dict = {k.replace("lora.", ""): v for k, v in value_dict.items()}
+            lora_layer = LoRALinearLayer(target_module.in_features, target_module.out_features, rank, network_alpha)
+            lora_layer.load_state_dict(value_dict)
+            lora_layer.to(device=self.text_encoder.device, dtype=self.text_encoder.dtype)
+
+            old_forward = target_module.forward
+
+            def make_new_forward(old_forward, lora_layer):
+                def new_forward(x):
+                    return old_forward(x) + lora_layer(x)
+
+                return new_forward
+
+            # Monkey-patch.
+            target_module.forward = make_new_forward(old_forward, lora_layer)
 
 
 class FromCkptMixin:
