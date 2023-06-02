@@ -339,7 +339,7 @@ class LoraLoaderMixinTests(unittest.TestCase):
             outputs_without_lora, outputs_without_lora_removed
         ), "remove lora monkey patch should restore the original outputs"
 
-    def create_lora_weight_file(self, tmpdirname, lora_up_seed=None):
+    def create_lora_weight_file(self, tmpdirname):
         _, lora_components = self.get_dummy_components()
         LoraLoaderMixin.save_lora_weights(
             save_directory=tmpdirname,
